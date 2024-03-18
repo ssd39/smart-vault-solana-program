@@ -1,0 +1,16 @@
+[package]
+name = "smart_vault"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "smart_vault"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+borsh = "1.3.1"
+solana-program = "1.18.4"
+spl-token = { version="4.0.1", features = [ "no-entrypoint" ]}
+thiserror = "1.0.58"
