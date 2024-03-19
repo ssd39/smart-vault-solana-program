@@ -47,6 +47,27 @@ pub fn process_instruction(
             transit_key,
             p2p_connection,
         } => join(&transit_key, attestation_proof, p2p_connection),
+        SmartVaultInstrunction::AddApp {
+            rent_amount,
+            ipfs_hash,
+        } => add_app(program_id, accounts, ipfs_hash, rent_amount),
+        SmartVaultInstrunction::Bid {
+            _signature,
+            bid_amount,
+        } => bid(program_id, accounts, _signature, bid_amount),
+        SmartVaultInstrunction::ClaimBid { _signature } => {
+            claimbid(program_id, accounts, _signature)
+        }
+        SmartVaultInstrunction::CloseSub {} => close_sub(program_id, accounts),
+        SmartVaultInstrunction::ReportWork { nonce, _signature } => {
+            report_work(program_id, accounts, nonce, _signature)
+        }
+        SmartVaultInstrunction::StartSubscription {
+            max_rent,
+            app_id,
+            params_hash,
+        } => start_subscription(program_id, accounts, max_rent, app_id, params_hash),
+        SmartVaultInstrunction::TopUp { amount } => topup(program_id, accounts, amount),
     }
 }
 
