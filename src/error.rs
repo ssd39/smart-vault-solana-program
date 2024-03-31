@@ -26,8 +26,11 @@ pub enum VaultError {
     #[error("Restart phase")]
     RestartPhase,
     #[error("Valid consesues not provided")]
-    InvalidConsesues
+    InvalidConsesues,
+    #[error("Signature verification failed.")]
+    SigVerificationFailed,
 }
+
 
 impl From<VaultError> for ProgramError {
     fn from(e: VaultError) -> Self {

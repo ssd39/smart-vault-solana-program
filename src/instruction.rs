@@ -9,7 +9,6 @@ pub enum SmartVaultInstrunction {
     Join {
         attestation_proof: String,
         transit_key: Pubkey,
-        p2p_connection: String,
     },
     AddApp {
         rent_amount: u64,
@@ -24,15 +23,15 @@ pub enum SmartVaultInstrunction {
         params_hash: String,
     },
     Bid {
-        _signature: String,
+        _signature: [u8; 64],
         bid_amount: u64,
     },
     ClaimBid {
-        _signature: String,
+        _signature: [u8; 64],
     },
     ReportWork {
         nonce: u64,
-        _signature: String,
+        _signature: [u8; 64],
     },
     CloseSub {},
 }
@@ -47,7 +46,6 @@ struct InitPayload {
 struct JoinPayload {
     attestation_proof: String,
     transit_key: Pubkey,
-    p2p_connection: String,
 }
 
 #[derive(BorshDeserialize)]
@@ -70,19 +68,19 @@ struct StartSubscriptionPayload {
 
 #[derive(BorshDeserialize)]
 struct BidPayload {
-    _signature: String,
+    _signature: [u8; 64],
     bid_amount: u64,
 }
 
 #[derive(BorshDeserialize)]
 struct ClaimBidPayload {
-    _signature: String,
+    _signature: [u8; 64],
 }
 
 #[derive(BorshDeserialize)]
 struct ReportWorkPayload {
     nonce: u64,
-    _signature: String,
+    _signature: [u8; 64],
 }
 
 impl SmartVaultInstrunction {
@@ -103,7 +101,6 @@ impl SmartVaultInstrunction {
                 Self::Join {
                     attestation_proof: payload.attestation_proof,
                     transit_key: payload.transit_key,
-                    p2p_connection: payload.p2p_connection,
                 }
             }
             2 => {

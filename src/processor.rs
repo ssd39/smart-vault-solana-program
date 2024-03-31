@@ -19,9 +19,10 @@ use crate::{
         VaultAppCounterState, VaultAppState, VaultBidderState, VaultMetaDataState, VaultUserState,
         VaultUserSubscriptionState,
     },
+    utils::{is_ata_owner, is_valid_consesues},
 };
 
-use spl_token::{instruction::transfer, state::Account};
+use spl_token::{instruction::transfer, state::Account, ID as TOKEN_PROGRAM_ID};
 
 static VAULT_METADATA: &str = "METADATA";
 static APP_COUNTER: &str = "APP_COUNTER";
@@ -45,8 +46,7 @@ pub fn process_instruction(
         SmartVaultInstrunction::Join {
             attestation_proof,
             transit_key,
-            p2p_connection,
-        } => join(&transit_key, attestation_proof, p2p_connection),
+        } => join(&transit_key, attestation_proof),
         SmartVaultInstrunction::AddApp {
             rent_amount,
             ipfs_hash,
@@ -82,6 +82,7 @@ pub fn init(
     let initializer = next_account_info(account_info_iter)?;
     let pda_account = next_account_info(account_info_iter)?;
     let app_counter = next_account_info(account_info_iter)?;
+    let program_treasury = next_account_info(account_info_iter)?;
     let system_program = next_account_info(account_info_iter)?;
 
     // TODO: in future add logic of consesues rolling. Also integrate chainlink functions for attestation verification
@@ -101,6 +102,14 @@ pub fn init(
         Pubkey::find_program_address(&[APP_COUNTER.as_bytes()], program_id);
 
     if app_counter_pda != *app_counter.key {
+        msg!("Invalid seeds for PDA");
+        return Err(VaultError::InvalidPDA.into());
+    }
+
+    let (program_treasury_pda, _treasury_bump_seed) =
+        Pubkey::find_program_address(&[TREASURY_STATE.as_bytes()], program_id);
+
+    if program_treasury_pda != *program_treasury.key {
         msg!("Invalid seeds for PDA");
         return Err(VaultError::InvalidPDA.into());
     }
@@ -145,6 +154,26 @@ pub fn init(
         &[&[APP_COUNTER.as_bytes(), &[_counter_bump_seed]]],
     )?;
 
+    let state_size = 0;
+    let rent = Rent::get()?;
+    let rent_lamports = rent.minimum_balance(state_size);
+
+    invoke_signed(
+        &system_instruction::create_account(
+            initializer.key,
+            program_treasury.key,
+            rent_lamports,
+            state_size.try_into().unwrap(),
+            program_id,
+        ),
+        &[
+            initializer.clone(),
+            program_treasury.clone(),
+            system_program.clone(),
+        ],
+        &[&[TREASURY_STATE.as_bytes(), &[_treasury_bump_seed]]],
+    )?;
+
     let mut account_data =
         try_from_slice_unchecked::<VaultMetaDataState>(&pda_account.data.borrow()).unwrap();
 
@@ -160,7 +189,7 @@ pub fn init(
         msg!("App counter acc already exsist!");
         return Err(ProgramError::AccountAlreadyInitialized);
     }
-
+    msg!("ProtocolInit:{}:{}", vault_public_key, attestation_proof);
     account_data.attestation_proof = attestation_proof;
     account_data.vault_public_key = *vault_public_key;
     account_data.is_initialized = true;
@@ -168,21 +197,13 @@ pub fn init(
 
     app_counter_data.is_initialized = true;
     app_counter_data.serialize(&mut &mut app_counter.data.borrow_mut()[..])?;
+
     Ok(())
 }
 
-pub fn join(
-    transit_key: &Pubkey,
-    attestation_proof: String,
-    p2p_connection: String,
-) -> ProgramResult {
+pub fn join(transit_key: &Pubkey, attestation_proof: String) -> ProgramResult {
     // TODO: on join, server providers need to lock some amount of token and there will be state associated with their acc to maintain reputation and locked tokens
-    msg!(
-        "JoinReq:{}:{}:{}",
-        transit_key,
-        attestation_proof,
-        p2p_connection
-    );
+    msg!("JoinReq:{}:{}", transit_key, attestation_proof);
     Ok(())
 }
 
@@ -207,7 +228,7 @@ pub fn add_app(
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    if creator_ata.owner != creator.key {
+    if !is_ata_owner(creator.key, creator_ata) {
         msg!("Wrong spl token account provided");
         return Err(ProgramError::InvalidAccountOwner);
     }
@@ -289,7 +310,7 @@ pub fn topup(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> Prog
     let user_state: &AccountInfo<'_> = next_account_info(account_info_iter)?;
     let program_treasury = next_account_info(account_info_iter)?;
     let program_ata = next_account_info(account_info_iter)?;
-    let spl_token_account = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
     let system_program = next_account_info(account_info_iter)?;
 
     if !user.is_signer {
@@ -297,18 +318,13 @@ pub fn topup(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> Prog
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    if user_ata.owner != user.key {
+    if !is_ata_owner(user.key, user_ata) {
         msg!("Wrong ata provided");
         return Err(ProgramError::InvalidAccountOwner);
     }
 
-    if user_state.owner != program_id {
-        msg!("Wrong user state account provided");
-        return Err(ProgramError::InvalidAccountOwner);
-    }
-
     if program_treasury.owner != program_id {
-        msg!("Wrong programme ata account provided");
+        msg!("Wrong treasury account provided");
         return Err(ProgramError::InvalidAccountOwner);
     }
 
@@ -320,7 +336,7 @@ pub fn topup(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> Prog
         return Err(VaultError::InvalidPDA.into());
     }
 
-    if program_ata.owner != program_treasury.key {
+    if !is_ata_owner(program_treasury.key, program_ata) {
         msg!("Wrong treasury ata account provided");
         return Err(ProgramError::InvalidAccountOwner);
     }
@@ -362,11 +378,16 @@ pub fn topup(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> Prog
         )?;
     }
 
+    if user_state.owner != program_id {
+        msg!("Wrong user state account provided");
+        return Err(ProgramError::InvalidAccountOwner);
+    }
+
     let mut user_state_data =
         try_from_slice_unchecked::<VaultUserState>(&user_state.data.borrow()).unwrap();
 
     let transfer_tokens_to_programm = transfer(
-        spl_token_account.key,
+        &TOKEN_PROGRAM_ID,
         user_ata.key,
         program_ata.key,
         user.key,
@@ -379,8 +400,8 @@ pub fn topup(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> Prog
         &[
             user_ata.clone(),
             program_ata.clone(),
-            spl_token_account.clone(),
             user.clone(),
+            token_program.clone(),
         ],
     )?;
 
@@ -404,7 +425,6 @@ pub fn start_subscription(
     let subscriber_state = next_account_info(account_info_iter)?;
     let subscriber_sub_state = next_account_info(account_info_iter)?;
     let app_state: &AccountInfo<'_> = next_account_info(account_info_iter)?;
-
     let system_program = next_account_info(account_info_iter)?;
 
     if !subscriber.is_signer {
@@ -419,11 +439,6 @@ pub fn start_subscription(
 
     if subscriber_state.owner != program_id {
         msg!("invalid subscriber state pda");
-        return Err(ProgramError::InvalidAccountOwner);
-    }
-
-    if subscriber_sub_state.owner != program_id {
-        msg!("Wrong sub state account provided");
         return Err(ProgramError::InvalidAccountOwner);
     }
 
@@ -479,7 +494,7 @@ pub fn start_subscription(
         return Err(VaultError::InvalidPDA.into());
     }
 
-    let state_size = 8 + 1 + 1 + 8 + (4 + params_hash.len()) + 8 + 1 + 32 + 8 + 8 + 8 + 1;
+    let state_size = 8 + 1 + 1 + 8 + (4 + params_hash.len()) + 8 + 1 + 32 + 8 + 8 + 8 + 8 + 1;
     let rent = Rent::get()?;
     let rent_lamports = rent.minimum_balance(state_size);
 
@@ -520,7 +535,7 @@ pub fn start_subscription(
     subscriber_sub_state_data.params_hash = params_hash;
     subscriber_sub_state_data.max_rent = max_rent;
     subscriber_sub_state_data.rent = max_rent;
-    subscriber_sub_state_data.bid_endtime = clock.unix_timestamp as u64 + 600;
+    subscriber_sub_state_data.bid_endtime = clock.unix_timestamp as u64 + 60;
 
     subscriber_sub_state_data.serialize(&mut &mut subscriber_sub_state.data.borrow_mut()[..])?;
 
@@ -541,7 +556,7 @@ pub fn start_subscription(
 pub fn bid(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
-    _signature: String,
+    _signature: [u8; 64],
     bid_amount: u64,
 ) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
@@ -552,17 +567,11 @@ pub fn bid(
     let sub_state: &AccountInfo<'_> = next_account_info(account_info_iter)?;
     let metadata: &AccountInfo<'_> = next_account_info(account_info_iter)?;
     let system_program = next_account_info(account_info_iter)?;
+    let ix_sysvar: &AccountInfo<'_> = next_account_info(account_info_iter)?;
 
-    if !consensus.is_signer {
+    if !bidder.is_signer {
         msg!("Missing required signature");
         return Err(ProgramError::MissingRequiredSignature);
-    }
-
-    is_valid_consesues(consensus, metadata, program_id)?;
-
-    if bidder_state.owner != program_id {
-        msg!("Wrong bidder state account provided");
-        return Err(ProgramError::InvalidAccountOwner);
     }
 
     if sub_state.owner != program_id {
@@ -596,10 +605,27 @@ pub fn bid(
         )?;
     }
 
+    if bidder_state.owner != program_id {
+        msg!("Wrong bidder state account provided");
+        return Err(ProgramError::InvalidAccountOwner);
+    }
+
     let mut bidder_state_data =
         try_from_slice_unchecked::<VaultBidderState>(&bidder_state.data.borrow()).unwrap();
 
-    //TODO: signature verification
+    let mut raw_message: [u8; 40] = [0; 40];
+    raw_message[..32].copy_from_slice(bidder.key.to_bytes().as_ref());
+    raw_message[32..].copy_from_slice(bidder_state_data.nonce.to_be_bytes().as_ref());
+
+    is_valid_consesues(
+        VAULT_METADATA,
+        ix_sysvar,
+        consensus,
+        metadata,
+        program_id,
+        raw_message.as_ref(),
+        _signature.as_ref(),
+    )?;
 
     let mut sub_state_data =
         try_from_slice_unchecked::<VaultUserSubscriptionState>(&sub_state.data.borrow()).unwrap();
@@ -640,7 +666,7 @@ pub fn bid(
 pub fn claimbid(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
-    _signature: String,
+    _signature: [u8; 64],
 ) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
 
@@ -649,13 +675,12 @@ pub fn claimbid(
     let bid_winner_state = next_account_info(account_info_iter)?;
     let sub_state: &AccountInfo<'_> = next_account_info(account_info_iter)?;
     let metadata: &AccountInfo<'_> = next_account_info(account_info_iter)?;
+    let ix_sysvar: &AccountInfo<'_> = next_account_info(account_info_iter)?;
 
-    if !consensus.is_signer {
+    if !bid_winner.is_signer {
         msg!("Missing required signature");
         return Err(ProgramError::MissingRequiredSignature);
     }
-
-    is_valid_consesues(consensus, metadata, program_id)?;
 
     if bid_winner_state.owner != program_id {
         msg!("Wrong bidder state account provided");
@@ -685,7 +710,19 @@ pub fn claimbid(
         return Err(ProgramError::UninitializedAccount);
     }
 
-    //TODO: signature verification
+    let mut raw_message: [u8; 40] = [0; 40];
+    raw_message[..32].copy_from_slice(bid_winner.key.to_bytes().as_ref());
+    raw_message[32..].copy_from_slice(bid_winner_state_data.nonce.to_be_bytes().as_ref());
+
+    is_valid_consesues(
+        VAULT_METADATA,
+        ix_sysvar,
+        consensus,
+        metadata,
+        program_id,
+        raw_message.as_ref(),
+        _signature.as_ref(),
+    )?;
 
     let mut sub_state_data =
         try_from_slice_unchecked::<VaultUserSubscriptionState>(&sub_state.data.borrow()).unwrap();
@@ -716,6 +753,9 @@ pub fn claimbid(
         msg!("You failed to claim bid!");
         //TODO: add logic to decrease the reputation of bid winner
         return Err(VaultError::BidClaimExpired.into());
+    } else if cur_time < sub_state_data.bid_endtime {
+        msg!("Trying to claim bid too early!");
+        return  Err(VaultError::ReportedEarly.into());
     }
 
     bid_winner_state_data.nonce += 1;
@@ -732,7 +772,7 @@ pub fn report_work(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     nonce: u64,
-    _signature: String,
+    _signature: [u8; 64],
 ) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
 
@@ -745,15 +785,14 @@ pub fn report_work(
     let user_state = next_account_info(account_info_iter)?;
     let program_treasury = next_account_info(account_info_iter)?;
     let program_ata = next_account_info(account_info_iter)?;
-    let metadata: &AccountInfo<'_> = next_account_info(account_info_iter)?;
-    let spl_token_account = next_account_info(account_info_iter)?;
+    let metadata = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+    let ix_sysvar = next_account_info(account_info_iter)?;
 
-    if !consensus.is_signer {
+    if !bid_winner.is_signer {
         msg!("Missing required signature");
         return Err(ProgramError::MissingRequiredSignature);
     }
-
-    is_valid_consesues(consensus, metadata, program_id)?;
 
     if bid_winner_state.owner != program_id {
         msg!("Wrong bidder state account provided");
@@ -770,7 +809,7 @@ pub fn report_work(
         return Err(ProgramError::InvalidAccountOwner);
     }
 
-    if bid_winner_ata.owner != bid_winner.key {
+    if !is_ata_owner(bid_winner.key, bid_winner_ata) {
         msg!("Wrong associated token account provided");
         return Err(ProgramError::InvalidAccountOwner);
     }
@@ -788,7 +827,7 @@ pub fn report_work(
         return Err(VaultError::InvalidPDA.into());
     }
 
-    if program_ata.owner != program_treasury.key {
+    if !is_ata_owner(program_treasury.key, program_ata) {
         msg!("Wrong treasury ata account provided");
         return Err(ProgramError::InvalidAccountOwner);
     }
@@ -827,7 +866,19 @@ pub fn report_work(
         return Err(ProgramError::UninitializedAccount);
     }
 
-    //TODO: signature verification
+    let mut raw_message: [u8; 40] = [0; 40];
+    raw_message[..32].copy_from_slice(bid_winner.key.to_bytes().as_ref());
+    raw_message[32..].copy_from_slice(bid_winner_state_data.nonce.to_be_bytes().as_ref());
+
+    is_valid_consesues(
+        VAULT_METADATA,
+        ix_sysvar,
+        consensus,
+        metadata,
+        program_id,
+        raw_message.as_ref(),
+        _signature.as_ref(),
+    )?;
 
     let mut sub_state_data =
         try_from_slice_unchecked::<VaultUserSubscriptionState>(&sub_state.data.borrow()).unwrap();
@@ -894,7 +945,7 @@ pub fn report_work(
         msg!("SubClosed:{}", sub_state.key);
     } else if !sub_state_data.restart {
         let transfer_token_to_worker = transfer(
-            spl_token_account.key,
+            &TOKEN_PROGRAM_ID,
             program_ata.key,
             bid_winner_ata.key,
             program_treasury.key,
@@ -905,10 +956,10 @@ pub fn report_work(
         invoke_signed(
             &transfer_token_to_worker,
             &[
-                spl_token_account.clone(),
                 program_ata.clone(),
                 bid_winner_ata.clone(),
                 program_treasury.clone(),
+                token_program.clone(),
             ],
             &[&[TREASURY_STATE.as_bytes(), &[_pata_bump_seed]]],
         )?;
@@ -967,33 +1018,6 @@ pub fn close_sub(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult
     sub_state_data.serialize(&mut &mut user_sub.data.borrow_mut()[..])?;
     msg!("SubClosed:{}", user_sub.key);
 
-    Ok(())
-}
-
-pub fn is_valid_consesues(
-    consensus: &AccountInfo,
-    metadata: &AccountInfo,
-    program_id: &Pubkey,
-) -> Result<(), ProgramError> {
-    let (metadata_pda, _) = Pubkey::find_program_address(&[VAULT_METADATA.as_bytes()], program_id);
-
-    if metadata_pda != *metadata.key {
-        msg!("Invalid seeds for PDA");
-        return Err(VaultError::InvalidPDA.into());
-    }
-
-    let metadata_data =
-        try_from_slice_unchecked::<VaultMetaDataState>(&metadata.data.borrow()).unwrap();
-
-    if !metadata_data.is_initialized() {
-        msg!("Protocol not initialized!");
-        return Err(ProgramError::UninitializedAccount);
-    }
-
-    if metadata_data.vault_public_key != *consensus.key {
-        msg!("Wrong consesues key provided");
-        return Err(VaultError::InvalidConsesues.into());
-    }
     Ok(())
 }
 
